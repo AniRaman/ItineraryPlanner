@@ -14,7 +14,7 @@ from agent import (
     get_directions, get_place_autocomplete, get_place_details, 
     get_places_nearby, get_places_text_search, cached_place_details, 
     cached_nearby_search, sample_route_points, get_pois_along_route,
-    search_pois_along_route, validate_itinerary_pois,
+    search_pois_along_route, validate_itinerary,
     root_agent
 )
 

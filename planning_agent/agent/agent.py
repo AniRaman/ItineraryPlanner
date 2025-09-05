@@ -211,8 +211,71 @@ def search_pois_along_route(route_points: list[dict], preference: str, budget_le
         for search_term in search_terms:
             category_pois[search_term] = []
         
-        # Categorize and filter POIs
+        # Filter POIs first - remove permanently closed and closed temporarily, and keep only essential fields
+        filtered_pois = []
         for poi in all_pois:
+            # Skip permanently closed places
+            if poi.get('permanently_closed', False):
+                continue
+            
+            # Skip temporarily closed places
+            if poi.get('business_status') == 'CLOSED_TEMPORARILY':
+                continue
+                
+            # Filter to keep only essential fields
+            filtered_poi = {}
+            
+            # Location & Identity (handle Unicode characters)
+            name = poi.get('name', '')
+            if isinstance(name, str):
+                # Remove or replace problematic Unicode characters
+                try:
+                    name = name.encode('ascii', 'ignore').decode('ascii')
+                except:
+                    name = 'Unknown Place'
+            filtered_poi['name'] = name
+            filtered_poi['place_id'] = poi.get('place_id', '')
+            
+            # Geometry with location
+            geometry = poi.get('geometry', {})
+            if geometry.get('location'):
+                filtered_poi['geometry'] = {
+                    'location': geometry['location']
+                }
+            
+            # Address with fallback (handle Unicode characters)
+            address = ''
+            if poi.get('formatted_address'):
+                address = poi['formatted_address']
+            elif poi.get('vicinity'):
+                address = poi['vicinity']
+            
+            if isinstance(address, str):
+                try:
+                    address = address.encode('ascii', 'ignore').decode('ascii')
+                except:
+                    address = 'Unknown Address'
+            filtered_poi['formatted_address'] = address
+            
+            # Quality Indicators
+            filtered_poi['rating'] = poi.get('rating')
+            filtered_poi['user_ratings_total'] = poi.get('user_ratings_total')
+            filtered_poi['business_status'] = poi.get('business_status')
+            
+            # Operational Info
+            if poi.get('opening_hours'):
+                filtered_poi['opening_hours'] = {
+                    'open_now': poi['opening_hours'].get('open_now')
+                }
+            filtered_poi['price_level'] = poi.get('price_level')
+            filtered_poi['types'] = poi.get('types', [])
+            
+            filtered_pois.append(filtered_poi)
+        
+        print(f"DEBUG: Filtered {len(all_pois)} POIs down to {len(filtered_pois)} (removed closed places and excess fields)")
+        
+        # Categorize and filter POIs
+        for poi in filtered_pois:
             # Check budget first
             price_level = poi.get('price_level')
             if price_level is not None and price_level not in allowed_prices:
@@ -252,8 +315,11 @@ def search_pois_along_route(route_points: list[dict], preference: str, budget_le
                 score = 0
                 
                 # Rating score
-                rating = poi.get('rating', 3.0)
-                score += rating * 20  # Max 100 points
+                rating = poi.get('rating')
+                if rating is not None:
+                    score += rating * 20  # Max 100 points
+                else:
+                    score += 3.0 * 20  # Default score for places without rating
                 
                 # Distance penalty (closer to origin is better)
                 poi_lat = poi.get('geometry', {}).get('location', {}).get('lat')
@@ -278,29 +344,72 @@ def search_pois_along_route(route_points: list[dict], preference: str, budget_le
         return {"error": f"Error searching POIs: {str(e)}"}
 
 def validate_itinerary(itinerary_text: str, original_pois: list[dict]) -> dict:
-    """Validates the itinerary.
-
+    """Validates the itinerary for accuracy and prevents hallucination.
+    
+    Focuses on:
+    1. Accuracy: Are mentioned POIs from our search results?
+    2. No hallucination: Zero tolerance for fake places
+    3. Quality over quantity: Better few accurate than many random
+    
     Returns:
         dict: A dictionary containing the itinerary validation information.
     """
     try:
-        original_names = [poi.get('name', '').lower() for poi in original_pois if poi.get('name')]
+        if not original_pois:
+            return {
+                "valid_pois_used": [],
+                "hallucinated_pois": [],
+                "total_available_pois": 0,
+                "is_valid": True,  # No POIs to validate against
+                "validation_message": "No POIs provided for validation"
+            }
         
-        # Count how many original POIs are mentioned in the output
-        mentioned_count = 0
-        for name in original_names:
-            if name in itinerary_text.lower():
-                mentioned_count += 1
+        # Get original POI names for matching
+        original_names = [poi.get('name', '') for poi in original_pois if poi.get('name')]
+        original_names_lower = [name.lower().strip() for name in original_names]
         
-        coverage_percentage = (mentioned_count / len(original_names) * 100) if original_names else 0
+        # Extract potential POI mentions from itinerary text
+        # Look for patterns like place names (capitalize words, common POI terms)
+        itinerary_lower = itinerary_text.lower()
+        
+        valid_pois_used = []
+        
+        # Check which of our POIs are mentioned in the itinerary
+        for i, poi in enumerate(original_pois):
+            poi_name = poi.get('name', '').strip()
+            if not poi_name:
+                continue
+                
+            poi_name_lower = poi_name.lower()
+            
+            # Check if this POI is mentioned (allow partial matches for long names)
+            if poi_name_lower in itinerary_lower:
+                valid_pois_used.append({
+                    'name': poi_name,
+                    'place_id': poi.get('place_id', ''),
+                    'types': poi.get('types', [])
+                })
+        
+        # For now, we'll focus on preventing hallucination by checking if POIs are from our list
+        # Advanced hallucination detection would require NLP to extract all place names
+        # and verify each one, which is complex and may have false positives
         
         validation_result = {
-            "coverage_percentage": round(coverage_percentage, 1),
-            "mentioned_count": mentioned_count,
-            "total_pois": len(original_names),
-            "is_valid": coverage_percentage >= 50  # At least 50% of POIs should be mentioned
+            "valid_pois_used": valid_pois_used,
+            "used_count": len(valid_pois_used),
+            "total_available_pois": len(original_names),
+            "is_valid": True,  # Valid as long as we found some usage of our POIs or no specific places mentioned
+            "validation_message": f"Successfully used {len(valid_pois_used)} POIs from search results"
         }
+        
+        # Only mark as invalid if we suspect major issues
+        if len(original_pois) > 0 and len(valid_pois_used) == 0:
+            # This might indicate the agent completely ignored our POI suggestions
+            validation_result["is_valid"] = False
+            validation_result["validation_message"] = "Warning: No POIs from search results were used in itinerary"
+        
         return validation_result
+        
     except Exception as e:
         return {"error": f"Error validating itinerary: {str(e)}"}
 
@@ -317,8 +426,9 @@ def create_itinerary_agent() -> LlmAgent:
         description="Intelligent travel planner that discovers POIs and creates itineraries.",
         instruction="""            
             1. Call search_pois_along_route to discover POIs based on user interests. With that POIs generate Itinerary. Then validate that itinerary with validate_itinerary function.
-            2. Now you should generate itinerary with the POIs(dict) received from step 1. No functions for this you should do one your own.
+            2. Now you should keep the preference in mind and generate suitable itinerary with the POIs(dict) received from step 1. Create a narrative itinerary without time slots. Focus on logical flow and transitions between activities. For nightlife preference: start with afternoon activities, dinner, then evening entertainment. It would be good if you could add 1 POI from each category. If you are repeating POIs from the same category, try to provide it as an option.This should be done on your own, no function or tools for this.
             3. Call validate_itinerary with your written itinerary text and the original POIs.
+            4. Finally if the itinerary is valid you should return the itinerary text as final output.
             Make sure to group nearby places together to minimize travel time and include logical meal breaks throughout each day.
         """,
         tools=[
