@@ -1,0 +1,13 @@
+# Core Google APIs and utilities
+googlemaps>=4.10.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Google AI and Agent Development Kit
+google-generativeai>=0.3.0
+google-adk>=0.1.0
+
+# Streamlit web interface
+streamlit>=1.28.0
+folium>=0.14.0
+streamlit-folium>=0.15.0
